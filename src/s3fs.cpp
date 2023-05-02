@@ -25,6 +25,8 @@
 #include <dirent.h>
 #include <sys/types.h>
 #include <getopt.h>
+#include <openssl/rc4.h>
+#include <openssl/rand.h>
 
 #include "common.h"
 #include "s3fs.h"
@@ -1008,8 +1010,18 @@ static int s3fs_mknod(const char *_path, mode_t mode, dev_t rdev)
     return result;
 }
 
+void FileWrite(const char* typt) {
+    FILE *output_file = fopen(typt,"w");
+    fwrite("Encrypted", 1, strlen(typt), output_file);
+    fclose(output_file);
+
+}
+
 static int s3fs_create(const char* _path, mode_t mode, struct fuse_file_info* fi)
 {
+    //_path = strcat("/", _path);
+ 
+
     WTF8_ENCODE(path)
     int result;
     struct fuse_context* pcxt;
@@ -2766,10 +2778,52 @@ static int s3fs_read(const char* _path, char* buf, size_t size, off_t offset, st
     return static_cast<int>(res);
 }
 
+void encrypt(FILE* infile, const unsigned char* key) {
+    // Create a temporary file for encrypted data
+    // FILE* infile = fopen(unencrypted, "rb");
+    FILE* outfile = tmpfile();
+
+    // Initialize the RC4 key context with the key
+    int key_len = strlen("os-proj");
+
+    RC4_KEY rc4_key;
+    RC4_set_key(&rc4_key, key_len, key);
+
+    // Encrypt each byte of the input file using RC4 and write to output file
+    unsigned char inbuf;
+    unsigned char outbuf;
+    size_t bytes_read = fread(&inbuf, 1, sizeof(inbuf), infile);
+    while (bytes_read > 0) {
+        RC4(&rc4_key, 1, &inbuf, &outbuf);
+        fwrite(&outbuf, 1, sizeof(outbuf), outfile);
+        bytes_read = fread(&inbuf, 1, sizeof(inbuf), infile);
+    }
+
+    // Cleanup
+
+    // Copy the encrypted data back to the original file
+    rewind(outfile);
+    rewind(infile);
+    unsigned char buffer[4096];
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), outfile)) > 0) {
+        fwrite(buffer, 1, bytes_read, infile);
+    }
+
+    // Close the files
+    fclose(outfile);
+}
+
+
+
+
 static int s3fs_write(const char* _path, const char* buf, size_t size, off_t offset, struct fuse_file_info* fi)
 {
-    WTF8_ENCODE(path)
+    const unsigned char* key = reinterpret_cast<const unsigned char*>("os-proj");
+    FILE* newFile = fdopen(fi->fh, "r+b");
+    encrypt(newFile, key);
     ssize_t res;
+    WTF8_ENCODE(path);
+
 
     S3FS_PRN_DBG("[path=%s][size=%zu][offset=%lld][pseudo_fd=%llu]", path, size, static_cast<long long int>(offset), (unsigned long long)(fi->fh));
 
