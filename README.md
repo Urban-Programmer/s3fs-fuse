@@ -144,6 +144,12 @@ echo ACCESS_KEY_ID:SECRET_ACCESS_KEY > /etc/passwd-s3fs
 chmod 600 /etc/passwd-s3fs
 ```
 
+##RC4 Implementation:
+To compile my standalone RC4 use the followingn commands:
+
+Then run the compilcation with these arguements
+./test (-d / -e ), ( "Random String" ), "input_path" , "output", "-s / null" 
+
 Note2: You may also need to make sure `netfs` service is start on boot
 
 ## Limitations
