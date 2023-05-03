@@ -102,7 +102,7 @@ static bool use_wtf8              = false;
 static off_t fake_diskfree_size   = -1; // default is not set(-1)
 static int max_thread_count       = 5;  // default is 5
 static bool update_parent_dir_stat= false;  // default not updating parent directory stats
-
+bool is_encrypted;
 //-------------------------------------------------------------------
 // Global functions : prototype
 //-------------------------------------------------------------------
@@ -2750,79 +2750,124 @@ static int s3fs_open(const char* _path, struct fuse_file_info* fi)
     return 0;
 }
 
+std::vector<unsigned char> chrisDecode(const unsigned char* key, size_t keylen, const unsigned char* data, size_t datalen){
+    //Declare Vars
+    RC4_KEY rc4_key;
+    RC4_set_key(&rc4_key, keylen, key);
+
+    std::vector<unsigned char> decrypted_data(datalen);
+    RC4(&rc4_key, datalen, data, decrypted_data.data());
+    
+    //Return Datamethod
+    return decrypted_data;
+}
+
 static int s3fs_read(const char* _path, char* buf, size_t size, off_t offset, struct fuse_file_info* fi)
 {
-    WTF8_ENCODE(path)
-    ssize_t res;
-
-    S3FS_PRN_DBG("[path=%s][size=%zu][offset=%lld][pseudo_fd=%llu]", path, size, static_cast<long long>(offset), (unsigned long long)(fi->fh));
-
+    // Get the underlying file entity
+    std::string path = std::string(_path);
     AutoFdEntity autoent;
-    FdEntity*    ent;
-    if(NULL == (ent = autoent.GetExistFdEntity(path, static_cast<int>(fi->fh)))){
-        S3FS_PRN_ERR("could not find opened pseudo_fd(=%llu) for path(%s)", (unsigned long long)(fi->fh), path);
-        return -EIO;
+    FdEntity* ent;
+    if(NULL == (ent = autoent.GetExistFdEntity(path.c_str(), static_cast<int>(fi->fh)))){
+    S3FS_PRN_ERR("could not find opened pseudo_fd(%llu) for path(%s)", (unsigned long long)(fi->fh), path.c_str());
+    return -EIO;
+}
+
+
+    // Read the data from the file entity
+    std::vector<unsigned char> data(size);
+    ssize_t res = ent->Read(static_cast<int>(fi->fh), reinterpret_cast<char*>(data.data()), size, offset);
+    if(res < 0){
+        S3FS_PRN_WARN("failed to read file(%s). result=%zd", path.c_str(), res);
+        return res;
     }
 
-    // check real file size
-    off_t realsize = 0;
-    if(!ent->GetSize(realsize) || 0 == realsize){
-        S3FS_PRN_DBG("file size is 0, so break to read.");
-        return 0;
+    // If the file is encrypted, decrypt the data
+    
+    if (is_encrypted) {
+        const unsigned char* key = reinterpret_cast<const unsigned char*>("Aaron");
+        size_t keylen = strlen(reinterpret_cast<const char*>(key));
+        std::vector<unsigned char> decrypted_data = chrisDecode(key, keylen, data.data(), data.size());
+        memcpy(buf, decrypted_data.data(), decrypted_data.size());
+        res = decrypted_data.size();
+    } else {
+        memcpy(buf, data.data(), res);
     }
-
-    if(0 > (res = ent->Read(static_cast<int>(fi->fh), buf, offset, size, false))){
-        S3FS_PRN_WARN("failed to read file(%s). result=%zd", path, res);
-    }
+    is_encrypted = false;
 
     return static_cast<int>(res);
 }
 
-void encrypt(FILE* infile, const unsigned char* key) {
-    // Create a temporary file for encrypted data
-    // FILE* infile = fopen(unencrypted, "rb");
-    FILE* outfile = tmpfile();
 
-    // Initialize the RC4 key context with the key
-    int key_len = strlen("os-proj");
 
+
+// void encrypt(FILE* infile, const unsigned char* key) {
+//     // Create a temporary file for encrypted data
+//     // FILE* infile = fopen(unencrypted, "rb");
+//     FILE* outfile = tmpfile();
+
+//     // Initialize the RC4 key context with the key
+//     int key_len = strlen("os-proj");
+
+//     RC4_KEY rc4_key;
+//     RC4_set_key(&rc4_key, key_len, key);
+
+//     // Encrypt each byte of the input file using RC4 and write to output file
+//     unsigned char inbuf;
+//     unsigned char outbuf;
+//     size_t bytes_read = fread(&inbuf, 1, sizeof(inbuf), infile);
+//     while (bytes_read > 0) {
+//         RC4(&rc4_key, 1, &inbuf, &outbuf);
+//         fwrite(&outbuf, 1, sizeof(outbuf), outfile);
+//         bytes_read = fread(&inbuf, 1, sizeof(inbuf), infile);
+//     }
+
+//     // Cleanup
+
+//     // Copy the encrypted data back to the original file
+//     rewind(outfile);
+//     rewind(infile);
+//     unsigned char buffer[4096];
+//     while ((bytes_read = fread(buffer, 1, sizeof(buffer), outfile)) > 0) {
+//         fwrite(buffer, 1, bytes_read, infile);
+//     }
+
+//     // Close the files
+//     fclose(outfile);
+// }
+
+
+
+//Encoding Method                     // Takes Key            //Size of Key               //Data byte         //Data Length
+std::vector<unsigned char> chrisEncode(const unsigned char* key, size_t keylen, const unsigned char* data, size_t datalen){
+    //Declare Vars
     RC4_KEY rc4_key;
-    RC4_set_key(&rc4_key, key_len, key);
+    RC4_set_key(&rc4_key, keylen, key);
 
-    // Encrypt each byte of the input file using RC4 and write to output file
-    unsigned char inbuf;
-    unsigned char outbuf;
-    size_t bytes_read = fread(&inbuf, 1, sizeof(inbuf), infile);
-    while (bytes_read > 0) {
-        RC4(&rc4_key, 1, &inbuf, &outbuf);
-        fwrite(&outbuf, 1, sizeof(outbuf), outfile);
-        bytes_read = fread(&inbuf, 1, sizeof(inbuf), infile);
-    }
 
-    // Cleanup
-
-    // Copy the encrypted data back to the original file
-    rewind(outfile);
-    rewind(infile);
-    unsigned char buffer[4096];
-    while ((bytes_read = fread(buffer, 1, sizeof(buffer), outfile)) > 0) {
-        fwrite(buffer, 1, bytes_read, infile);
-    }
-
-    // Close the files
-    fclose(outfile);
+    std::vector<unsigned char> encrypted_data(datalen);
+    RC4(&rc4_key, datalen, data, encrypted_data.data());
+    
+    //Return Datamethod
+    return encrypted_data;
 }
-
 
 
 
 static int s3fs_write(const char* _path, const char* buf, size_t size, off_t offset, struct fuse_file_info* fi)
 {
-    const unsigned char* key = reinterpret_cast<const unsigned char*>("os-proj");
-    FILE* newFile = fdopen(fi->fh, "r+b");
-    encrypt(newFile, key);
+    //Debugging 
+    //FILE* newFile = fdopen(fi->fh, "r+b");
+    //encrypt(newFile, key);
+    //Declaring Vars
+    const unsigned char* key = reinterpret_cast<const unsigned char*>("Aaron");
+    size_t keylen = strlen(reinterpret_cast<const char*>(key));
+    
     ssize_t res;
     WTF8_ENCODE(path);
+
+    const unsigned char* data = reinterpret_cast<const unsigned char*>(buf);
+    std::vector<unsigned char> encrypted_buf = chrisEncode(key, keylen, data, size);
 
 
     S3FS_PRN_DBG("[path=%s][size=%zu][offset=%lld][pseudo_fd=%llu]", path, size, static_cast<long long int>(offset), (unsigned long long)(fi->fh));
@@ -2833,10 +2878,12 @@ static int s3fs_write(const char* _path, const char* buf, size_t size, off_t off
         S3FS_PRN_ERR("could not find opened pseudo_fd(%llu) for path(%s)", (unsigned long long)(fi->fh), path);
         return -EIO;
     }
-
-    if(0 > (res = ent->Write(static_cast<int>(fi->fh), buf, offset, size))){
+    //Replaced : if(0 > (res = ent->Write(static_cast<int>(fi->fh), encrypted_buf, offset, size))) (Was getting type errors)
+    if(0 > (res = ent->Write(static_cast<int>(fi->fh), reinterpret_cast<const char*>(encrypted_buf.data()), offset, size))){
         S3FS_PRN_WARN("failed to write file(%s). result=%zd", path, res);
     }
+
+
 
     if(max_dirty_data != -1 && ent->BytesModified() >= max_dirty_data){
         int flushres;
@@ -2850,6 +2897,7 @@ static int s3fs_write(const char* _path, const char* buf, size_t size, off_t off
             S3FS_PRN_WARN("could not punching HOLEs to a cache file, but continue.");
         }
     }
+    is_encrypted = true;
 
     return static_cast<int>(res);
 }
